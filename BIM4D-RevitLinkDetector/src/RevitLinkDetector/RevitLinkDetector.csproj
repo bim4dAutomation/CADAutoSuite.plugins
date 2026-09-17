@@ -1,0 +1,183 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!--
+      RevitLinkDetector supports Revit 2024 through 2027. Each Revit
+      generation needs a DIFFERENT .NET runtime for add-ins, so this
+      project multi-targets rather than picking one framework:
+
+        Revit 2024                              -> net48          (.NET Framework 4.8)
+        Revit 2025                               -> net8.0-windows (.NET 8)
+        Revit 2026 (initial release, pre-2026.5) -> net8.0-windows (.NET 8)
+        Revit 2026.5+ (from 2026-09-21 per APS)  -> net10.0-windows (.NET 10)
+        Revit 2027                               -> net10.0-windows (.NET 10)
+
+      scripts/revit-versions.json is the single source of truth mapping
+      each supported year to its TargetFramework/engine/RuntimeRequirements
+      - update it there, not here, when Autodesk ships/retires an engine.
+      See docs/BUILD.md for the full rationale, including why 2026
+      straddles two runtimes mid-cycle and why 2027's Design Automation
+      engine availability needs to be verified live (scripts/appbundle-
+      register.js "list-engines" mode) before you rely on it.
+
+      `dotnet build` with no -f builds all three frameworks in one pass;
+      scripts/pack-bundle.ps1 -RevitYear <year> builds just the one it
+      needs for that year's AppBundle.
+
+      IExternalDBApplication (this add-in's entry point) lives in
+      Autodesk.Revit.DB, i.e. RevitAPI.dll only - it's the headless
+      counterpart of IExternalApplication and never touches RevitAPIUI,
+      so we don't reference RevitAPIUI.dll and don't need
+      UseWindowsForms/UseWPF on the net8/net10 targets either.
+    -->
+    <TargetFrameworks>net48;net8.0-windows;net10.0-windows</TargetFrameworks>
+    <AssemblyName>RevitLinkDetector</AssemblyName>
+    <RootNamespace>Bim4D.RevitLinkDetector</RootNamespace>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <AppendTargetFrameworkToOutputPath>true</AppendTargetFrameworkToOutputPath>
+    <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
+    <!-- Without this, net8.0-windows/net10.0-windows builds of a plain
+         class library (this project's OutputType) do NOT copy referenced
+         NuGet packages' DLLs (Newtonsoft.Json.dll) into bin/ at all - only
+         net48 does that by default. pack-bundle.ps1 needs Newtonsoft.Json.dll
+         sitting right next to RevitLinkDetector.dll for every framework, so
+         force copy-local everywhere (found by an actual failed build, not
+         assumed - net8.0-windows's own build succeeded but the file was
+         missing from its output folder). ExcludeAssets="runtime" on the
+         RevitAPI/DesignAutomationFramework NuGet packages below still wins
+         over this and keeps THOSE out of bin/, exactly as intended. -->
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+  </PropertyGroup>
+
+  <!--
+    Named per-year Solution Configurations (Debug_2024/Release_2024, etc.
+    - see RevitLinkDetector.sln), so Visual Studio's ordinary Solution
+    Configurations dropdown builds exactly one Revit year's TargetFramework
+    without also needing the separate "Target Framework" selector VS shows
+    for multi-targeted projects, and without passing -f on the command
+    line. Plain "Debug|x64"/"Release|x64" still build all three
+    TargetFrameworks at once, same as before - these are additive, not a
+    replacement.
+
+    MSBuild's own Debug/Release defaults (Optimize, DebugSymbols,
+    DefineConstants) only trigger on the exact literal Configuration
+    values "Debug"/"Release", so a Configuration named e.g. "Debug_2024"
+    needs those re-derived explicitly from its prefix below - otherwise a
+    "Debug_2024" build would silently come out optimized/non-debuggable.
+  -->
+  <PropertyGroup Condition="$(Configuration.StartsWith('Debug_'))">
+    <DebugSymbols>true</DebugSymbols>
+    <DebugType>portable</DebugType>
+    <Optimize>false</Optimize>
+    <DefineConstants>DEBUG;TRACE</DefineConstants>
+  </PropertyGroup>
+  <PropertyGroup Condition="$(Configuration.StartsWith('Release_'))">
+    <Optimize>true</Optimize>
+    <DefineConstants>TRACE</DefineConstants>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="$(Configuration.EndsWith('_2024'))">
+    <TargetFrameworks>net48</TargetFrameworks>
+  </PropertyGroup>
+  <PropertyGroup Condition="$(Configuration.EndsWith('_2025')) Or $(Configuration.EndsWith('_2026'))">
+    <TargetFrameworks>net8.0-windows</TargetFrameworks>
+  </PropertyGroup>
+  <PropertyGroup Condition="$(Configuration.EndsWith('_2027'))">
+    <!-- Needs the .NET 10 SDK installed ("dotnet" version 10.x or newer) -
+         a 9.x-only SDK fails this with NETSDK1045. -->
+    <TargetFrameworks>net10.0-windows</TargetFrameworks>
+  </PropertyGroup>
+
+  <!--
+    Where RevitAPI.dll / DesignAutomationFramework.dll come from at build
+    time. Both are <Private>false</Private> below either way - they are
+    NEVER bundled into the AppBundle zip; the cloud Design Automation
+    engine already has the real ones, so this only affects what you
+    compile against, not what runs.
+
+    DEFAULT (UseLocalRevitInstall unset/false): NuGet reference-assembly
+    packages, verified (2026-09-16) via nuget.org to exist for every
+    supported year and TargetFramework combination below:
+      - RevitAPI.dll                  -> Nice3point.Revit.Api.RevitAPI
+        (community-maintained reference assemblies, MIT-style project:
+        https://github.com/Nice3point/RevitApi - NOT an Autodesk
+        package, but the standard way most Revit add-in projects avoid
+        needing a local Revit install just to compile).
+      - DesignAutomationFramework.dll -> Autodesk.Forge.DesignAutomation.Revit
+        (published by Autodesk's own "Autodesk" account on nuget.org).
+      Both packages version-number their releases to match the Revit
+      year (e.g. "2024.3.60" for Revit 2024), which is what
+      RevitApiPackageVersion/DesignAutomationPackageVersion below pin to.
+      This means: no local Revit install of ANY year is required to
+      build this project anymore. Bump these version numbers over time -
+      check nuget.org for newer patches per year; a plain
+      dotnet restore will tell you if a pin is stale/yanked.
+
+    OPT-OUT (UseLocalRevitInstall=true): reference DLLs from an actual
+    local Revit install (or the Design Automation SDK samples) instead,
+    e.g. if you'd rather build against the exact DLLs a specific engine
+    ships, or nuget.org is unreachable on your network:
+      dotnet build -f net48 -p:UseLocalRevitInstall=true -p:RevitApiDir="D:\Autodesk\Revit 2024"
+  -->
+  <PropertyGroup>
+    <UseLocalRevitInstall Condition="'$(UseLocalRevitInstall)'==''">false</UseLocalRevitInstall>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(TargetFramework)'=='net48'">
+    <LangVersion>7.3</LangVersion>
+    <RevitApiDir Condition="'$(RevitApiDir)'==''">C:\Program Files\Autodesk\Revit 2024</RevitApiDir>
+    <RevitApiPackageVersion>2024.3.60</RevitApiPackageVersion>
+    <DesignAutomationPackageVersion>2024.0.2</DesignAutomationPackageVersion>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(TargetFramework)'=='net8.0-windows'">
+    <!--
+      Shared compile-time target for Revit 2025 AND 2026 (both map to
+      net8.0-windows in scripts/revit-versions.json today - see the big
+      comment above). Pinned to the 2025 package versions: the
+      TransmissionData/ExternalFileReference/ModelPathUtils surface this
+      project actually calls is stable across both years, so compiling
+      once against 2025's reference assemblies is safe for both bundle
+      outputs - this never affects what runs, only what compiles against.
+      Re-check when Revit 2026.5's .NET 10 engine change (2026-09-21)
+      lands, in case 2026 needs to move to its own TFM.
+    -->
+    <RevitApiDir Condition="'$(RevitApiDir)'==''">C:\Program Files\Autodesk\Revit 2025</RevitApiDir>
+    <RevitApiPackageVersion>2025.4.60</RevitApiPackageVersion>
+    <DesignAutomationPackageVersion>2025.0.1</DesignAutomationPackageVersion>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(TargetFramework)'=='net10.0-windows'">
+    <RevitApiDir Condition="'$(RevitApiDir)'==''">C:\Program Files\Autodesk\Revit 2027</RevitApiDir>
+    <RevitApiPackageVersion>2027.2.0</RevitApiPackageVersion>
+    <DesignAutomationPackageVersion>2027.0.0</DesignAutomationPackageVersion>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(UseLocalRevitInstall)'=='true'">
+    <Reference Include="RevitAPI">
+      <HintPath>$(RevitApiDir)\RevitAPI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="DesignAutomationFramework">
+      <HintPath>$(RevitApiDir)\DesignAutomationFramework.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(UseLocalRevitInstall)'!='true'">
+    <!-- ExcludeAssets="runtime": compile against these, but never copy their
+         DLLs into bin/publish output - the same intent as <Private>false</Private>
+         on a classic Reference. This is a belt-and-suspenders safety measure on
+         top of pack-bundle.ps1's own explicit file list (it doesn't just zip up
+         everything in bin/), since these NuGet packages are reference-assembly
+         stand-ins (some contain stub/throwing implementations), never the real
+         thing the cloud engine actually runs against. -->
+    <PackageReference Include="Nice3point.Revit.Api.RevitAPI" Version="$(RevitApiPackageVersion)" ExcludeAssets="runtime" />
+    <PackageReference Include="Autodesk.Forge.DesignAutomation.Revit" Version="$(DesignAutomationPackageVersion)" ExcludeAssets="runtime" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+  </ItemGroup>
+
+</Project>

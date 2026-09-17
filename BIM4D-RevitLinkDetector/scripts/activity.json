@@ -1,0 +1,25 @@
+{
+  "_comment": "Design Automation Activity TEMPLATE for RevitLinkDetector, shared across all supported Revit years. appbundle-register.js reads this once per year (from scripts/revit-versions.json) and substitutes {{YEAR}}/{{ENGINE}}/{{APPBUNDLE_ID}}/{{APPBUNDLE_ALIAS}} before POSTing it. Kept as its own file (rather than inlined in the script) so the Activity shape can be reviewed/diffed on its own, independent of the per-year loop logic.",
+
+  "id": "LinkDetectorActivity{{YEAR}}",
+  "commandLine": [
+    "$(engine.path)\\revitcoreconsole.exe /i \"$(args[hostModel].path)\" /al \"$(appbundles[RevitLinkDetector{{YEAR}}].path)\""
+  ],
+  "engine": "{{ENGINE}}",
+  "appbundles": ["{{APPBUNDLE_ID}}+{{APPBUNDLE_ALIAS}}"],
+  "parameters": {
+    "hostModel": {
+      "verb": "get",
+      "description": "The host .rvt file to read link references from. Downloaded to the working directory as hostModel.rvt — must match LinkDetectionHandler.InputLocalName exactly.",
+      "localName": "hostModel.rvt",
+      "required": true
+    },
+    "result": {
+      "verb": "put",
+      "description": "The JSON result (LinkDetectionResult) this add-in writes. Must match LinkDetectionHandler.OutputLocalName exactly.",
+      "localName": "result.json",
+      "required": true
+    }
+  },
+  "description": "Reads a Revit {{YEAR}} host file's saved TransmissionData link references and reports them as JSON, without opening the document."
+}
