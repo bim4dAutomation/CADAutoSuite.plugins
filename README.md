@@ -1,0 +1,1 @@
+# CADAutoSuite.plugins
